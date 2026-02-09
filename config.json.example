@@ -1,4 +1,5 @@
 {
   "appid": "your_wechat_appid_here",
-  "appsecret": "your_wechat_appsecret_here"
+  "appsecret": "your_wechat_appsecret_here",
+  "author": "Your Name"
 }

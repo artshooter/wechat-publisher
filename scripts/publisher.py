@@ -46,6 +46,7 @@ class WeChatPublisher:
         """初始化发布器"""
         self.appid = None
         self.appsecret = None
+        self.author = None
         self.access_token = None
         self.load_config()
 
@@ -80,23 +81,31 @@ class WeChatPublisher:
         # 验证必需字段
         self.appid = config.get('appid', '').strip()
         self.appsecret = config.get('appsecret', '').strip()
+        self.author = config.get('author', '').strip()
 
         if not self.appid or self.appid in ['your_appid_here', 'your_appid']:
             raise ValueError(f"请在配置文件中填写有效的appid\n配置文件: {self.CONFIG_FILE}")
         if not self.appsecret or self.appsecret in ['your_appsecret_here', 'your_appsecret']:
             raise ValueError(f"请在配置文件中填写有效的appsecret\n配置文件: {self.CONFIG_FILE}")
 
+        # author 是可选字段，如果未设置给出提示
+        if not self.author or self.author in ['Your Name', 'your_name_here']:
+            print("⚠ 提示: 未配置作者名，将使用空值或调用时指定的作者名")
+            self.author = ""
+
         # 验证格式
         if not self.appid.startswith('wx') or len(self.appid) != 18:
             print("⚠ 警告: AppID格式可能不正确（应为wx开头的18位字符）")
 
-        print(f"✓ 配置加载成功 (AppID: {self.appid[:6]}***)")
+        author_info = f", 作者: {self.author}" if self.author else ""
+        print(f"✓ 配置加载成功 (AppID: {self.appid[:6]}***{author_info})")
 
     def _interactive_setup(self):
         """交互式配置向导"""
         print("\n请输入微信公众号凭证：")
         appid = input("AppID (wx开头): ").strip()
         appsecret = input("AppSecret: ").strip()
+        author = input("作者名 (可选，留空则每次发布时可指定): ").strip()
 
         # 简单验证
         if not appid.startswith('wx'):
@@ -104,7 +113,11 @@ class WeChatPublisher:
 
         # 创建配置目录和文件
         os.makedirs(os.path.dirname(self.CONFIG_FILE), exist_ok=True)
-        config_data = {"appid": appid, "appsecret": appsecret}
+        config_data = {
+            "appid": appid,
+            "appsecret": appsecret,
+            "author": author if author else ""
+        }
 
         with open(self.CONFIG_FILE, 'w', encoding='utf-8') as f:
             json.dump(config_data, f, indent=2, ensure_ascii=False)
@@ -115,6 +128,49 @@ class WeChatPublisher:
 
         self.appid = appid
         self.appsecret = appsecret
+        self.author = author
+
+    def _get_public_ip(self) -> str:
+        """
+        获取当前机器的公网 IP 地址（微信 API 看到的真实 IP）
+
+        优先使用国内 IP 检测服务，因为它们和微信 API 走相同的路由。
+        如果用户使用代理/VPN 且有分流规则，国外服务可能返回代理出口 IP，
+        而国内服务和微信 API 一样走直连，返回真实 IP。
+
+        Returns:
+            公网 IP 地址字符串，获取失败则返回 "无法获取"
+        """
+        import re
+
+        # 优先使用国内服务（和微信 API 走相同路由）
+        # 然后是国外服务作为备用
+        services = [
+            ('https://myip.ipip.net', 'cn'),      # 国内，返回格式: "当前 IP：x.x.x.x  来自于：..."
+            ('https://api-ipv4.ip.sb/ip', 'intl'), # 有国内节点
+            ('https://api.ipify.org', 'intl'),
+            ('https://ifconfig.me/ip', 'intl'),
+        ]
+
+        for url, region in services:
+            try:
+                response = requests.get(url, timeout=5)
+                if response.status_code == 200:
+                    text = response.text.strip()
+
+                    # ipip.net 返回格式特殊，需要提取 IP
+                    if 'ipip.net' in url:
+                        match = re.search(r'(\d+\.\d+\.\d+\.\d+)', text)
+                        if match:
+                            return match.group(1)
+                    else:
+                        # 其他服务直接返回 IP
+                        if text and '.' in text and len(text) <= 15:
+                            return text
+            except Exception:
+                continue
+
+        return "无法获取"
 
     def _handle_api_error(self, errcode: int, errmsg: str, context: str = "") -> str:
         """统一处理API错误，返回友好的中文提示"""
@@ -126,13 +182,19 @@ class WeChatPublisher:
             error_detail += "\n\n💡 解决方法："
             error_detail += "\n  1. 登录微信公众平台 https://mp.weixin.qq.com"
             error_detail += "\n  2. 设置与开发 → 基本配置 → IP白名单"
-            error_detail += "\n  3. 添加当前服务器IP"
-            try:
-                import socket
-                ip = socket.gethostbyname(socket.gethostname())
-                error_detail += f"\n  4. 当前IP可能是: {ip}"
-            except:
-                pass
+            error_detail += "\n  3. 添加以下公网IP到白名单"
+
+            # 获取真实的公网 IP（微信看到的 IP）
+            print("\n→ 正在检测公网IP...")
+            public_ip = self._get_public_ip()
+
+            if public_ip != "无法获取":
+                error_detail += f"\n\n  需要添加到白名单的IP: {public_ip}"
+                error_detail += "\n  （这是微信服务器看到的您的真实公网IP）"
+            else:
+                error_detail += "\n\n  无法自动检测公网IP，请手动查询："
+                error_detail += "\n  - 访问 https://ipinfo.io 查看您的公网IP"
+                error_detail += "\n  - 或访问 https://ifconfig.me"
 
         elif errcode in [40001, 40125, 40013]:
             error_detail += "\n\n💡 解决方法："
@@ -413,7 +475,7 @@ class WeChatPublisher:
     def create_draft(self,
                     title: str,
                     content: str,
-                    author: str = "",
+                    author: str = None,
                     thumb_media_id: str = "",
                     digest: str = "",
                     show_cover_pic: int = 1,
@@ -498,6 +560,10 @@ class WeChatPublisher:
             print(f"\n提示: 您可以在微信编辑器中手动修改为完整标题\n")
 
         print(f"→ 正在创建草稿: {title}")
+
+        # 如果没有传入 author，使用配置的 author
+        if author is None:
+            author = self.author
 
         if author:
             original_author = author
